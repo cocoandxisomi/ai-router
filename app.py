@@ -326,6 +326,13 @@ app = FastAPI(
 client = httpx.AsyncClient(timeout=180.0)
 
 
+@app.on_event("startup")
+async def on_startup():
+    """启动时确保必要目录存在"""
+    ensure_log_dir()
+    print("  [STARTUP] logs/ directory ready")
+
+
 @app.get("/")
 def root():
     return {"service": "AI Router", "status": "ok", "version": "3.1"}
@@ -514,40 +521,44 @@ async def gen_key(request: Request):
     if plan not in PLAN_QUOTAS:
         raise HTTPException(status_code=400, detail=f"Unknown plan: {plan}. Valid: {list(PLAN_QUOTAS.keys())}")
 
-    new_key = generate_key()
-    keys = load_keys()
-    keys[new_key] = {
-        "name": name,
-        "email": email,
-        "plan": plan,
-        "enabled": True,
-        "created": datetime.now().strftime("%Y-%m-%d %H:%M"),
-    }
-    save_keys(keys)
-    ensure_log_dir()
+    try:
+        ensure_log_dir()
+        new_key = generate_key()
+        keys = load_keys()
+        keys[new_key] = {
+            "name": name,
+            "email": email,
+            "plan": plan,
+            "enabled": True,
+            "created": datetime.now().strftime("%Y-%m-%d %H:%M"),
+        }
+        save_keys(keys)
 
-    # ── 发邮件通知管理员：有人订阅了
-    send_notification(
-        f"[AI Router] 新客户订阅 — {name}",
-        f"新客户已生成 API Key\n"
-        f"姓名: {name}\n"
-        f"邮箱: {email}\n"
-        f"套餐: {plan} ({PLAN_QUOTAS[plan]//1_000_000}M tokens/月)\n"
-        f"Key: {new_key[:10]}...{new_key[-4:]}\n"
-        f"时间: {datetime.now().strftime('%Y-%m-%d %H:%M')}\n"
-        f"\n记住把 Key 发给客户。"
-    )
+        # ── 发邮件通知管理员：有人订阅了
+        send_notification(
+            f"[AI Router] 新客户订阅 — {name}",
+            f"新客户已生成 API Key\n"
+            f"姓名: {name}\n"
+            f"邮箱: {email}\n"
+            f"套餐: {plan} ({PLAN_QUOTAS[plan]//1_000_000}M tokens/月)\n"
+            f"Key: {new_key[:10]}...{new_key[-4:]}\n"
+            f"时间: {datetime.now().strftime('%Y-%m-%d %H:%M')}\n"
+            f"\n记住把 Key 发给客户。"
+        )
 
-    return {
-        "ok": True,
-        "key": new_key,
-        "key_masked": new_key[:10] + "..." + new_key[-4:],
-        "name": name,
-        "email": email,
-        "plan": plan,
-        "limit": f"{PLAN_QUOTAS[plan]//1_000_000}M tokens/month",
-        "note": "Send this key to customer. You won't see it again from /admin/keys!",
-    }
+        return {
+            "ok": True,
+            "key": new_key,
+            "key_masked": new_key[:10] + "..." + new_key[-4:],
+            "name": name,
+            "email": email,
+            "plan": plan,
+            "limit": f"{PLAN_QUOTAS[plan]//1_000_000}M tokens/month",
+            "note": "Send this key to customer. You won't see it again from /admin/keys!",
+        }
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"gen_key error: {e}")
 
 
 @app.post("/admin/disable-key")
