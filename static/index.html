@@ -722,16 +722,17 @@
       <label>Your Email</label>
       <input type="email" id="emailInput" placeholder="you@example.com" required>
     </div>
-    <button class="pay-btn" onclick="showPay()">
-      Pay &amp; Get API Key
-    </button>
-    <div class="pay-note">Pay via PayPal · Card · Crypto · Key sent to your email</div>
+    <div id="paypal-button-container"></div>
+    <div class="pay-note">Secure payment via PayPal · Key sent instantly to your email</div>
   </div>
   <div class="success-box" id="successBox">
-    <div class="success-icon">✅</div>
-    <h2>Payment Received!</h2>
-    <p>Your API Key will be sent to:<br><strong id="confirmEmail"></strong></p>
-    <p style="margin-top:16px;">Usually within a few hours. Check your inbox and spam folder.<br>Questions? Email: <strong>support@airouter.ai</strong></p>
+    <div class="success-icon">🎉</div>
+    <h2>Payment Successful!</h2>
+    <p>Your API Key has been sent to:<br><strong id="confirmEmail"></strong></p>
+    <p style="margin-top:12px;">Check your inbox (and spam folder).<br>You can start using it right away!</p>
+    <p style="margin-top:16px; font-size:13px; color:var(--gray);">
+      Key preview: <strong id="keyPreview" style="color:var(--orange-light);"></strong>
+    </p>
   </div>
 </section>
 
@@ -815,7 +816,21 @@ console.log(res.choices[0].message.content);</pre>
 </footer>
 
 <script>
+// ============================================================
+// PayPal Smart Buttons — AI Router
+// ============================================================
+
 let selectedPlan = 'team';
+let paypalReady = false;
+let paypalOrderId = null;
+
+// Plan price map
+const PLAN_PRICES = {
+  starter:  9.9,
+  pro:      29.9,
+  team:     49.9,
+  business: 99.9,
+};
 
 function selectPlan(el) {
   document.querySelectorAll('.price-card').forEach(c => c.classList.remove('selected'));
@@ -831,39 +846,105 @@ function updatePlan() {
   });
 }
 
-function showPay() {
-  const email = document.getElementById('emailInput').value.trim();
-  if (!email || !email.includes('@')) {
-    alert('Please enter a valid email address.');
-    return;
+// Fetch PayPal config from our backend
+async function loadPayPal() {
+  try {
+    const res = await fetch('/api/paypal-config');
+    if (!res.ok) return;
+    const cfg = await res.json();
+    if (!cfg.client_id) return;
+
+    // Load PayPal SDK
+    const script = document.createElement('script');
+    script.src = `https://www.paypal.com/sdk/js?client-id=${cfg.client_id}&currency=${cfg.currency}`;
+    script.onload = () => renderPayPalButtons(cfg.client_id);
+    document.head.appendChild(script);
+  } catch (e) {
+    console.error('PayPal config load failed:', e);
   }
-  const prices = { starter: '$9.9', pro: '$29.9', team: '$49.9', business: '$99.9' };
-  const plan = selectedPlan;
-
-  const paid = confirm(
-    `Plan: ${prices[plan]}/month\nEmail: ${email}\n\n` +
-    `Click OK to pay via PayPal or card.\n` +
-    `Click Cancel to pay via Crypto.`
-  );
-
-  if (paid) {
-    window.open('https://www.paypal.me/YOUR_PAYPAL_USERNAME', '_blank');
-  } else {
-    alert('Send payment to:\n\nPayPal: your@email.com\nBTC: bc1qxxxxxxxx\nUSDT (TRC20): Txxxxxxxx\n\nThen click OK.');
-  }
-
-  setTimeout(() => {
-    if (confirm('Have you completed the payment?')) {
-      showSuccess(email);
-    }
-  }, 2000);
 }
 
-function showSuccess(email) {
+function renderPayPalButtons(clientId) {
+  if (typeof paypal === 'undefined') {
+    console.error('PayPal SDK not loaded');
+    return;
+  }
+  paypal.Buttons({
+    style: {
+      layout: 'vertical',
+      color: 'gold',
+      shape: 'rect',
+      label: 'paypal',
+    },
+    createOrder: function(data, actions) {
+      const email = document.getElementById('emailInput').value.trim();
+      if (!email || !email.includes('@')) {
+        alert('Please enter a valid email address first.');
+        return;
+      }
+      const amount = PLAN_PRICES[selectedPlan];
+      return actions.order.create({
+        purchase_units: [{
+          description: `AI Router ${selectedPlan} Plan (${selectedPlan === 'starter' ? '15M' : selectedPlan === 'pro' ? '40M' : selectedPlan === 'team' ? '80M' : '150M'} tokens/month)`,
+          amount: {
+            currency_code: 'USD',
+            value: amount.toFixed(2),
+          },
+          custom_id: `${email}|${selectedPlan}`,
+        }],
+      });
+    },
+    onApprove: async function(data, actions) {
+      // Payment approved — capture it
+      try {
+        const details = await actions.order.capture();
+        const orderId = details.id;
+        const email = document.getElementById('emailInput').value.trim();
+        const plan = selectedPlan;
+
+        // Call our backend to generate the API key and email it
+        const res = await fetch('/api/pay-success', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            email: email,
+            plan: plan,
+            paypal_order_id: orderId,
+          }),
+        });
+
+        const result = await res.json();
+        if (result.ok) {
+          showSuccess(email, result.key_masked || '');
+        } else {
+          alert('Payment received but key generation failed. Please email support.');
+        }
+      } catch (err) {
+        alert('Payment captured but email failed. Please contact support with your PayPal transaction ID.');
+      }
+    },
+    onError: function(err) {
+      alert('Payment error. Please try again or contact support.');
+      console.error('PayPal error:', err);
+    },
+    onCancel: function(data) {
+      // User cancelled — do nothing
+    },
+  }).render('#paypal-button-container');
+  paypalReady = true;
+}
+
+function showSuccess(email, keyMasked) {
   document.getElementById('checkoutForm').style.display = 'none';
   document.getElementById('successBox').classList.add('show');
   document.getElementById('confirmEmail').textContent = email;
+  if (keyMasked) {
+    document.getElementById('keyPreview').textContent = keyMasked;
+  }
 }
+
+// Load PayPal when page is ready
+window.addEventListener('DOMContentLoaded', loadPayPal);
 </script>
 
 </body>

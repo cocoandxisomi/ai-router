@@ -15,13 +15,14 @@ Usage:
   3. python app.py
 """
 
-import os, sys, json, time, secrets, smtplib, ssl
+import os, sys, json, time, secrets, smtplib, ssl, uuid
 from datetime import datetime, timezone
+from uuid import uuid4
 
 sys.stdout.reconfigure(encoding='utf-8', errors='replace')
 
-from fastapi import FastAPI, Request, HTTPException
-from fastapi.responses import StreamingResponse, JSONResponse, FileResponse
+from fastapi import FastAPI, Request, HTTPException, Form
+from fastapi.responses import StreamingResponse, JSONResponse, FileResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 import httpx
 from dotenv import load_dotenv
@@ -46,6 +47,14 @@ SMTP_USER = os.getenv("SMTP_USER", "3050781742@qq.com")
 SMTP_PASS = os.getenv("SMTP_PASS", "")
 ADMIN_EMAIL = SMTP_USER  # 所有通知发到这个邮箱
 ALERT_FILE = "logs/alerts.json"  # 防止 80% 通知重复发送
+
+# PayPal 配置
+PAYPAL_CLIENT_ID = os.getenv("PAYPAL_CLIENT_ID", "")
+PAYPAL_CLIENT_SECRET = os.getenv("PAYPAL_CLIENT_SECRET", "")
+PAYPAL_BASE_URL = "https://api-m.sandbox.paypal.com"  # 沙箱测试，上线换成 api-m.paypal.com
+
+# 支付记录
+PENDING_ORDERS_FILE = "logs/pending_orders.json"  # 格式: {order_id: {email, plan, name, created_at}}
 
 # ============================================================
 # 模型分级 — 商业机密，客户永远看不到
@@ -142,6 +151,31 @@ def send_notification(subject: str, body: str):
         print(f"  [EMAIL SENT] {subject}")
     except Exception as e:
         print(f"  [EMAIL FAIL] {subject}: {e}")
+
+def send_customer_email(to_email: str, subject: str, body: str):
+    """发送邮件给客户。"""
+    if not SMTP_PASS:
+        print(f"  [EMAIL SKIP - customer] No SMTP config")
+        return
+    msg = f"From: AI Router <{SMTP_USER}>\nTo: {to_email}\nSubject: {subject}\nContent-Type: text/plain; charset=utf-8\n\n{body}"
+    try:
+        ctx = ssl.create_default_context()
+        with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, context=ctx, timeout=10) as s:
+            s.login(SMTP_USER, SMTP_PASS)
+            s.sendmail(SMTP_USER, [to_email], msg.encode("utf-8"))
+        print(f"  [CUSTOMER EMAIL SENT] to {to_email}: {subject}")
+    except Exception as e:
+        print(f"  [CUSTOMER EMAIL FAIL] {to_email}: {e}")
+
+# ============================================================
+# 支付订单管理
+# ============================================================
+
+def load_pending_orders() -> dict:
+    return _load_json(PENDING_ORDERS_FILE, {})
+
+def save_pending_orders(data: dict):
+    _save_json(PENDING_ORDERS_FILE, data)
 
 def alert_sent(alert_key: str) -> bool:
     """检查这个警告是否已经发过，防止重复发送。"""
@@ -691,6 +725,118 @@ def landing_page():
     if os.path.exists(index):
         return FileResponse(index, media_type="text/html")
     return {"msg": "Landing page not found"}
+
+
+# ============================================================
+# PayPal 支付接口
+# ============================================================
+
+@app.get("/api/paypal-config")
+def paypal_config():
+    """返回 PayPal Client ID 给前端（不暴露 Secret）。"""
+    return {
+        "client_id": PAYPAL_CLIENT_ID,
+        "currency": "USD",
+    }
+
+
+@app.post("/api/pay-success")
+async def pay_success(request: Request):
+    """
+    PayPal 支付成功后前端调用此接口。
+    自动生成 API Key 并发送邮件给客户。
+
+    body: {"email": "...", "plan": "pro", "paypal_order_id": "..."}
+    """
+    body = await request.json()
+    email = body.get("email", "").strip()
+    plan = body.get("plan", "starter")
+    paypal_order_id = body.get("paypal_order_id", "unknown")
+
+    if not email or "@" not in email:
+        raise HTTPException(status_code=400, detail="Valid email required")
+
+    if plan not in PLAN_QUOTAS:
+        raise HTTPException(status_code=400, detail=f"Invalid plan: {plan}")
+
+    # 检查是否已生成过（防止重复支付）
+    pending = load_pending_orders()
+    if paypal_order_id in pending:
+        existing = pending[paypal_order_id]
+        # 已处理过，返回已有 key 的信息
+        return {
+            "ok": True,
+            "already_processed": True,
+            "email": email,
+            "plan": plan,
+            "message": f"Your API key was already sent to {email}. Please check your inbox.",
+        }
+
+    # 生成新 Key
+    new_key = generate_key()
+    keys = load_keys()
+    keys[new_key] = {
+        "name": email.split("@")[0],
+        "email": email,
+        "plan": plan,
+        "enabled": True,
+        "created": datetime.now().strftime("%Y-%m-%d %H:%M"),
+        "paypal_order": paypal_order_id,
+    }
+    save_keys(keys)
+
+    # 记录支付
+    pending[paypal_order_id] = {
+        "email": email,
+        "plan": plan,
+        "key_masked": new_key[:10] + "..." + new_key[-4:],
+        "created_at": datetime.now().isoformat(),
+    }
+    save_pending_orders(pending)
+
+    token_limit = PLAN_QUOTAS[plan]
+
+    # 发送邮件给客户
+    send_customer_email(
+        email,
+        "Your AI Router API Key is Ready!",
+        f"Hi,\n\n"
+        f"Thank you for subscribing to AI Router!\n\n"
+        f"Here is your API Key:\n\n"
+        f"  {new_key}\n\n"
+        f"Plan: {plan.upper()} ({token_limit//1_000_000}M tokens/month)\n"
+        f"Created: {datetime.now().strftime('%Y-%m-%d %H:%M UTC')}\n\n"
+        f"Quick Start:\n"
+        f"  curl -X POST \"https://YOUR_SERVER/v1/chat/completions\" \\\n"
+        f"    -H \"Authorization: Bearer {new_key}\" \\\n"
+        f"    -H \"Content-Type: application/json\" \\\n"
+        f"    -d '{{\"model\":\"ai-router\",\"messages\":[{{\"role\":\"user\",\"content\":\"Hello!\"}}]}}'\n\n"
+        f"Questions? Just reply to this email.\n\n"
+        f"— AI Router Team",
+    )
+
+    # 通知管理员
+    send_notification(
+        f"[AI Router] 新付费客户 — {email.split('@')[0]}",
+        f"新客户通过 PayPal 完成支付！\n"
+        f"邮箱: {email}\n"
+        f"套餐: {plan} ({token_limit//1_000_000}M tokens/月)\n"
+        f"Key: {new_key[:10]}...{new_key[-4:]}\n"
+        f"PayPal Order: {paypal_order_id}\n"
+        f"时间: {datetime.now().strftime('%Y-%m-%d %H:%M')}",
+    )
+
+    print(f"\n[PAYMENT] 新客户 {email} | plan={plan} | order={paypal_order_id}")
+    print(f"  [KEY GENERATED] {new_key[:10]}...{new_key[-4:]} | email sent to {email}")
+
+    return {
+        "ok": True,
+        "email": email,
+        "plan": plan,
+        "key_masked": new_key[:10] + "..." + new_key[-4:],
+        "limit": f"{token_limit//1_000_000}M tokens/month",
+        "message": f"API Key sent to {email}. Check your inbox!",
+    }
 
 
 # ============================================================
