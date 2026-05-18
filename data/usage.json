@@ -1,0 +1,22 @@
+{
+  "sk-518ff97ff1ef": {
+    "2026-05": {
+      "calls": 1,
+      "tokens_in": 16,
+      "tokens_out": 383,
+      "cost_usd": 0.000441,
+      "charge_usd": 0.001564,
+      "profit_usd": 0.001123
+    }
+  },
+  "sk-test": {
+    "2026-05": {
+      "calls": 6,
+      "tokens_in": 168,
+      "tokens_out": 4714,
+      "cost_usd": 0.013461,
+      "charge_usd": 0.040528,
+      "profit_usd": 0.027067
+    }
+  }
+}
