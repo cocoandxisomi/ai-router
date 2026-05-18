@@ -35,7 +35,7 @@ load_dotenv()
 
 SF_API_KEY = os.getenv("SF_API_KEY", "")
 SF_BASE_URL = "https://api.siliconflow.cn/v1"
-ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "admin123")
+ADMIN_TOKEN = os.getenv("ADMIN_KEY", "admin123")
 
 UNIFIED_MODEL = "ai-router"
 KEY_PREFIX = "sk-ar-"  # ar = AI Router，客户看到的 key 前缀
