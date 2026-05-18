@@ -15,7 +15,7 @@ Usage:
   3. python app.py
 """
 
-import os, sys, json, time, secrets, smtplib, ssl, uuid
+import os, sys, json, time, secrets, smtplib, ssl, uuid, threading
 from datetime import datetime, timezone
 from uuid import uuid4
 
@@ -534,17 +534,21 @@ async def gen_key(request: Request):
         }
         save_keys(keys)
 
-        # ── 发邮件通知管理员：有人订阅了
-        send_notification(
-            f"[AI Router] 新客户订阅 — {name}",
-            f"新客户已生成 API Key\n"
-            f"姓名: {name}\n"
-            f"邮箱: {email}\n"
-            f"套餐: {plan} ({PLAN_QUOTAS[plan]//1_000_000}M tokens/月)\n"
-            f"Key: {new_key[:10]}...{new_key[-4:]}\n"
-            f"时间: {datetime.now().strftime('%Y-%m-%d %H:%M')}\n"
-            f"\n记住把 Key 发给客户。"
-        )
+        # ── 后台发邮件通知管理员（不阻塞请求）
+        threading.Thread(
+            target=send_notification,
+            args=(
+                f"[AI Router] 新客户订阅 — {name}",
+                f"新客户已生成 API Key\n"
+                f"姓名: {name}\n"
+                f"邮箱: {email}\n"
+                f"套餐: {plan} ({PLAN_QUOTAS[plan]//1_000_000}M tokens/月)\n"
+                f"Key: {new_key[:10]}...{new_key[-4:]}\n"
+                f"时间: {datetime.now().strftime('%Y-%m-%d %H:%M')}\n"
+                f"\n记住把 Key 发给客户。",
+            ),
+            daemon=True,
+        ).start()
 
         return {
             "ok": True,
@@ -807,38 +811,46 @@ async def pay_success(request: Request):
 
     token_limit = PLAN_QUOTAS[plan]
 
-    # 发送邮件给客户
-    send_customer_email(
-        email,
-        "Your AI Router API Key is Ready!",
-        f"Hi,\n\n"
-        f"Thank you for subscribing to AI Router!\n\n"
-        f"Here is your API Key:\n\n"
-        f"  {new_key}\n\n"
-        f"Plan: {plan.upper()} ({token_limit//1_000_000}M tokens/month)\n"
-        f"Created: {datetime.now().strftime('%Y-%m-%d %H:%M UTC')}\n\n"
-        f"Quick Start:\n"
-        f"  curl -X POST \"https://YOUR_SERVER/v1/chat/completions\" \\\n"
-        f"    -H \"Authorization: Bearer {new_key}\" \\\n"
-        f"    -H \"Content-Type: application/json\" \\\n"
-        f"    -d '{{\"model\":\"ai-router\",\"messages\":[{{\"role\":\"user\",\"content\":\"Hello!\"}}]}}'\n\n"
-        f"Questions? Just reply to this email.\n\n"
-        f"— AI Router Team",
-    )
+    # 后台发送邮件给客户（不阻塞请求）
+    threading.Thread(
+        target=send_customer_email,
+        args=(
+            email,
+            "Your AI Router API Key is Ready!",
+            f"Hi,\n\n"
+            f"Thank you for subscribing to AI Router!\n\n"
+            f"Here is your API Key:\n\n"
+            f"  {new_key}\n\n"
+            f"Plan: {plan.upper()} ({token_limit//1_000_000}M tokens/month)\n"
+            f"Created: {datetime.now().strftime('%Y-%m-%d %H:%M UTC')}\n\n"
+            f"Quick Start:\n"
+            f"  curl -X POST \"https://YOUR_SERVER/v1/chat/completions\" \\\n"
+            f"    -H \"Authorization: Bearer {new_key}\" \\\n"
+            f"    -H \"Content-Type: application/json\" \\\n"
+            f"    -d '{{\"model\":\"ai-router\",\"messages\":[{{\"role\":\"user\",\"content\":\"Hello!\"}}]}}'\n\n"
+            f"Questions? Just reply to this email.\n\n"
+            f"— AI Router Team",
+        ),
+        daemon=True,
+    ).start()
 
-    # 通知管理员
-    send_notification(
-        f"[AI Router] 新付费客户 — {email.split('@')[0]}",
-        f"新客户通过 PayPal 完成支付！\n"
-        f"邮箱: {email}\n"
-        f"套餐: {plan} ({token_limit//1_000_000}M tokens/月)\n"
-        f"Key: {new_key[:10]}...{new_key[-4:]}\n"
-        f"PayPal Order: {paypal_order_id}\n"
-        f"时间: {datetime.now().strftime('%Y-%m-%d %H:%M')}",
-    )
+    # 后台通知管理员
+    threading.Thread(
+        target=send_notification,
+        args=(
+            f"[AI Router] 新付费客户 — {email.split('@')[0]}",
+            f"新客户通过 PayPal 完成支付！\n"
+            f"邮箱: {email}\n"
+            f"套餐: {plan} ({token_limit//1_000_000}M tokens/月)\n"
+            f"Key: {new_key[:10]}...{new_key[-4:]}\n"
+            f"PayPal Order: {paypal_order_id}\n"
+            f"时间: {datetime.now().strftime('%Y-%m-%d %H:%M')}",
+        ),
+        daemon=True,
+    ).start()
 
     print(f"\n[PAYMENT] 新客户 {email} | plan={plan} | order={paypal_order_id}")
-    print(f"  [KEY GENERATED] {new_key[:10]}...{new_key[-4:]} | email sent to {email}")
+    print(f"  [KEY GENERATED] {new_key[:10]}...{new_key[-4:]} | email sending in background to {email}")
 
     return {
         "ok": True,
